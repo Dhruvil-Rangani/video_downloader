@@ -1,0 +1,91 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>Video Downloader</title>
+    <style>
+        body { font-family: geistMono, "geistMono Fallback", monospace; max-width: 600px; margin: 0 auto; padding: 20px; }
+        h1 { text-align: center; }
+        form { display: flex; flex-direction: column; }
+        input, button { margin: 10px 0; padding: 10px; }
+        .message { padding: 10px; border-radius: 5px; }
+        .success { background-color: #d4edda; color: #155724; }
+        .button-style { cursor: pointer; color: #efefefff; background-color: #16a34a; font-family: monospace; font-size: 14px; font-weight: 500; border: none; border-radius: 1px; }
+        .error { background-color: #f8d7da; color: #721c24; }
+
+        /* additions (preserve your look) */
+        /* stop iOS input zoom + make tap area comfy */
+        #url { font-size: 16px; min-height: 44px; width: 100%; box-sizing: border-box; }
+        @media (max-width: 480px) {
+            body { padding: 16px; } /* tiny spacing tweak only on very small screens */
+        }
+    </style>
+</head>
+<body>
+    <h1>Download YouTube Video or Instagram Reel</h1>
+    <form action="/download" method="post">
+        <label for="url">Paste Link:</label>
+        <input type="text" id="url" name="url" required inputmode="url" autocapitalize="none" autocomplete="off" autocorrect="off" spellcheck="false"/>
+        <button class="button-style" type="submit">Download</button>
+    </form>
+    {% if error %}
+        <div class="message error">{{ error }}</div>
+    {% endif %}
+    <script>
+        const form = document.querySelector('form');
+        const button = form.querySelector('button');
+
+        form.addEventListener('submit', async (e) => {
+            e.preventDefault(); // don't navigate away
+            const oldText = button.textContent;
+            button.textContent = 'Processing...';
+            button.disabled = true;
+
+            // clear any previous error
+            let errBox = document.querySelector('.message.error');
+            if (errBox) errBox.remove();
+
+            try {
+            const res = await fetch(form.action, {
+                method: 'POST',
+                body: new FormData(form),
+            });
+
+            if (!res.ok) {
+                const txt = await res.text();
+                throw new Error(txt || `Request failed (${res.status})`);
+            }
+
+            // Parse filename from Content-Disposition if present
+            let filename = 'download';
+            const cd = res.headers.get('Content-Disposition');
+            if (cd) {
+                const m = cd.match(/filename\*=UTF-8''([^;]+)|filename="?([^"]+)"?/i);
+                filename = decodeURIComponent((m?.[1] || m?.[2] || filename).replace(/"/g, ''));
+            }
+
+            const blob = await res.blob();
+            const url = URL.createObjectURL(blob);
+
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = filename;
+            document.body.appendChild(a);
+            a.click();
+            a.remove();
+            URL.revokeObjectURL(url);
+            } catch (err) {
+            // show a simple error inline
+            errBox = document.createElement('div');
+            errBox.className = 'message error';
+            errBox.textContent = err?.message || 'Download failed.';
+            form.after(errBox);
+            } finally {
+            button.disabled = false;
+            button.textContent = oldText; // always reset UI
+            }
+        });
+    </script>
+</body>
+</html>
