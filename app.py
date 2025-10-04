@@ -1,6 +1,6 @@
-from flask import Flask, render_template, request, send_file, after_this_request
+from flask import Flask, render_template, request, send_file, after_this_request, jsonify
 import yt_dlp
-import os, re, unicodedata, shutil
+import os, re, unicodedata, shutil, base64
 
 app = Flask(__name__)
 DOWNLOAD_FOLDER = '/tmp/downloads'
@@ -14,13 +14,6 @@ def sanitize_filename(s: str) -> str:
     return s
 
 def find_ffmpeg():
-    """
-    Return a path usable for yt-dlp's ffmpeg_location.
-    Priority:
-      1) env FFMPEG_PATH (file or directory)
-      2) ffmpeg on PATH
-      3) ./bin/ffmpeg(.exe) shipped with app
-    """
     candidates = [
         os.environ.get('FFMPEG_PATH'),
         shutil.which('ffmpeg'),
@@ -29,9 +22,37 @@ def find_ffmpeg():
     ]
     for c in candidates:
         if c and os.path.exists(c):
-            # yt-dlp accepts a dir or file path
             return os.path.dirname(c) if os.path.isfile(c) else c
     return None
+
+def materialize_cookies():
+    """
+    Return a cookies.txt path if available via env, otherwise None.
+    Priority: YTDLP_COOKIES_B64 -> YTDLP_COOKIES -> ./cookies.txt
+    """
+    b64 = os.environ.get('YTDLP_COOKIES_B64')
+    if b64:
+        path = '/tmp/cookies.txt'
+        try:
+            with open(path, 'wb') as f:
+                f.write(base64.b64decode(b64))
+            return path
+        except Exception:
+            pass
+    path_env = os.environ.get('YTDLP_COOKIES')
+    if path_env and os.path.exists(path_env):
+        return path_env
+    local = os.path.abspath('cookies.txt')
+    if os.path.exists(local):
+        return local
+    return None
+
+def wants_json():
+    # Our frontend sends this header; fall back to Accept sniffing
+    if request.headers.get('X-Requested-With', '').lower() == 'fetch':
+        return True
+    accept = (request.headers.get('Accept') or '').lower()
+    return 'application/json' in accept
 
 @app.get('/')
 def index():
@@ -41,18 +62,16 @@ def index():
 def download():
     url = (request.form.get('url') or '').strip()
     if not url:
+        if wants_json():
+            return jsonify(error='Please paste a URL.'), 400
         return render_template('index.html', error='Please paste a URL.'), 400
 
     ffmpeg_loc = find_ffmpeg()
+    cookiefile = materialize_cookies()
 
-    # If we have ffmpeg, use best video+audio; otherwise, force a single progressive file (lower quality, not guaranteed)
-    fmt_with_ffmpeg = 'bv*+ba/b'  # best video+best audio; fallback to best single file
+    # With ffmpeg: best video+audio; otherwise, require progressive single-file fallback
+    fmt_with_ffmpeg = 'bv*+ba/b'
     fmt_progressive = 'best[acodec!=none][vcodec!=none][protocol^=http]/best[acodec!=none][vcodec!=none]'
-    # ^ tries to ensure a single file (no merging), preferring HTTP progressive
-
-    cookiefile = os.environ.get('YTDLP_COOKIES') or 'cookies.txt'
-    if not os.path.exists(cookiefile):
-        cookiefile = None
 
     ydl_opts = {
         'outtmpl': f'{DOWNLOAD_FOLDER}/%(id)s.%(ext)s',
@@ -68,9 +87,21 @@ def download():
         'no_warnings': True,
         'ffmpeg_location': ffmpeg_loc,
         'cookiefile': cookiefile,
+        # polite headers
+        'http_headers': {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
+                          '(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+            'Accept-Language': 'en-US,en;q=0.9',
+        }
     }
-    # Strip None values
     ydl_opts = {k: v for k, v in ydl_opts.items() if v is not None}
+
+    # Helpful explicit failure if ffmpeg is missing
+    if not ffmpeg_loc:
+        # Without ffmpeg, many YT links fail because no progressive stream.
+        # We allow it to try, but tell users why if it fails.
+        no_ffmpeg_hint = ("Server has no ffmpeg; falling back to progressive-only. "
+                          "Some YouTube links won't work without cookies or ffmpeg.")
 
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -79,12 +110,16 @@ def download():
                 info = info['entries'][0]
 
             vid_id = info.get('id')
-            # after postprocessing, ext can change (e.g., .mp4)
             candidates = [f'{vid_id}.mp4', f'{vid_id}.{info.get("ext","mp4")}']
-            file_path = next((os.path.join(DOWNLOAD_FOLDER, c) for c in candidates if os.path.exists(os.path.join(DOWNLOAD_FOLDER, c))), None)
+            file_path = next((os.path.join(DOWNLOAD_FOLDER, c)
+                              for c in candidates
+                              if os.path.exists(os.path.join(DOWNLOAD_FOLDER, c))), None)
 
             if not file_path:
-                return render_template('index.html', error='Download finished but file not found (check ffmpeg).'), 500
+                msg = 'Download finished but output file not found. Check ffmpeg/postprocessing.'
+                if wants_json():
+                    return jsonify(error=msg), 500
+                return render_template('index.html', error=msg), 500
 
             @after_this_request
             def cleanup(resp):
@@ -92,14 +127,27 @@ def download():
                 except Exception: pass
                 return resp
 
-            download_name = sanitize_filename(f"{info.get('title') or 'video'}.mp4")
-            return send_file(file_path, mimetype='video/mp4', as_attachment=True, download_name=download_name)
+            dl_name = sanitize_filename(f"{info.get('title') or 'video'}.mp4")
+            return send_file(file_path, mimetype='video/mp4', as_attachment=True, download_name=dl_name)
 
     except yt_dlp.utils.DownloadError as e:
-        # Typical causes: private IG without cookies, geo/age restriction, no progressive stream when ffmpeg is absent
-        return render_template('index.html', error=f"Download error: {e}"), 400
+        msg = str(e)
+        # Friendly hint for the specific bot/cookie case
+        if 'confirm you’re not a bot' in msg.lower() or 'sign in' in msg.lower():
+            msg = ("YouTube is requiring cookies for this server IP. "
+                   "Add browser cookies (Netscape format) via YTDLP_COOKIES_B64 or YTDLP_COOKIES "
+                   "and redeploy. See README.")
+        elif not ffmpeg_loc:
+            msg = f"{msg} — Hint: {no_ffmpeg_hint}"
+        if wants_json():
+            return jsonify(error=f"Download error: {msg}"), 400
+        return render_template('index.html', error=f"Download error: {msg}"), 400
+
     except Exception as e:
-        return render_template('index.html', error=f"Failed: {e}"), 500
+        msg = f"Failed: {e}"
+        if wants_json():
+            return jsonify(error=msg), 500
+        return render_template('index.html', error=msg), 500
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))

@@ -1,27 +1,77 @@
 <!-- templates/index.html -->
 <!DOCTYPE html>
 <html lang="en">
+
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <title>Video Downloader (YouTube / Instagram)</title>
   <style>
-    body { background:#e4e4e4; font-family: geistMono, "geistMono Fallback", monospace; max-width: 600px; margin: 0 auto; padding: 20px; }
-    h1 { text-align: center; }
-    form { display: flex; flex-direction: column; }
-    input, button { margin: 10px 0; padding: 10px; }
-    .message { padding: 10px; border-radius: 5px; }
-    .button-style { cursor: pointer; color: #efefef; background: #16a34a; font-family: monospace; font-size: 14px; font-weight: 500; border: none; border-radius: 1px; }
-    .error { background: #f8d7da; color: #721c24; }
-    #url { font-size: 16px; min-height: 44px; width: 100%; box-sizing: border-box; }
-    @media (max-width: 480px) { body { padding: 16px; } }
+    body {
+      background: #e4e4e4;
+      font-family: geistMono, "geistMono Fallback", monospace;
+      max-width: 600px;
+      margin: 0 auto;
+      padding: 20px;
+    }
+
+    h1 {
+      text-align: center;
+    }
+
+    form {
+      display: flex;
+      flex-direction: column;
+    }
+
+    input,
+    button {
+      margin: 10px 0;
+      padding: 10px;
+    }
+
+    .message {
+      padding: 10px;
+      border-radius: 5px;
+    }
+
+    .button-style {
+      cursor: pointer;
+      color: #efefef;
+      background: #16a34a;
+      font-family: monospace;
+      font-size: 14px;
+      font-weight: 500;
+      border: none;
+      border-radius: 1px;
+    }
+
+    .error {
+      background: #f8d7da;
+      color: #721c24;
+    }
+
+    #url {
+      font-size: 16px;
+      min-height: 44px;
+      width: 100%;
+      box-sizing: border-box;
+    }
+
+    @media (max-width: 480px) {
+      body {
+        padding: 16px;
+      }
+    }
   </style>
 </head>
+
 <body>
   <h1>Download YouTube or Instagram</h1>
   <form action="/download" method="post">
     <label for="url">Paste link:</label>
-    <input type="text" id="url" name="url" required inputmode="url" autocapitalize="none" autocomplete="off" autocorrect="off" spellcheck="false" />
+    <input type="text" id="url" name="url" required inputmode="url" autocapitalize="none" autocomplete="off"
+      autocorrect="off" spellcheck="false" />
     <button class="button-style" type="submit">Download</button>
   </form>
   {% if error %}
@@ -41,8 +91,24 @@
       if (errBox) errBox.remove();
 
       try {
-        const res = await fetch(form.action, { method: 'POST', body: new FormData(form) });
-        if (!res.ok) throw new Error((await res.text()) || `Request failed (${res.status})`);
+        const res = await fetch(form.action, {
+          method: 'POST',
+          body: new FormData(form),
+          headers: { 'X-Requested-With': 'fetch', 'Accept': 'application/json' }
+        });
+
+        if (!res.ok) {
+          let msg = 'Download failed.';
+          try {
+            const j = await res.json();
+            if (j?.error) msg = j.error;
+          } catch (_) {
+            // ignore parse error; keep default message
+          }
+          throw new Error(msg);
+        }
+
+        // success: stream to a Blob and trigger download
         let filename = 'download.mp4';
         const cd = res.headers.get('Content-Disposition');
         if (cd) {
@@ -53,9 +119,9 @@
         const url = URL.createObjectURL(blob);
         const a = document.createElement('a');
         a.href = url; a.download = filename;
-        document.body.appendChild(a);
-        a.click(); a.remove();
+        document.body.appendChild(a); a.click(); a.remove();
         URL.revokeObjectURL(url);
+
       } catch (err) {
         errBox = document.createElement('div');
         errBox.className = 'message error';
@@ -68,4 +134,5 @@
     });
   </script>
 </body>
+
 </html>
